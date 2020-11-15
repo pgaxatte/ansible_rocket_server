@@ -42,26 +42,11 @@
         Check your sudo configuration to ensure that your connecting user
         can assume the identities of other users without prompting.
 
-  - name: "Configure /etc/hosts"
-    lineinfile:
+  - name: Deploy /etc/hosts template
+    tags: hosts
+    template:
+      src: hosts.j2
       dest: /etc/hosts
-      line: "{{ item.line }}"
-      regexp: "{{ item.regexp }}"
-      insertafter: "{{ item.insertafter | default(omit) }}"
-      insertbefore: "{{ item.insertbefore | default(omit) }}"
-      backrefs: "{{ item.backrefs | default(True) }}"
-    when: ansible_virtualization_type != "docker"
-    with_items:
-      - regexp: '^127\.0\.0\.1(.*){{ ansible_nodename }}(.*)'
-        line:   '127.0.0.1 \1 \2'
-      - regexp: '^127\.0\.0\.1(.*){{ ansible_hostname }}(.*)'
-        line:   '127.0.0.1 \1 \2'
-      - regexp: '^127\.0\.0\.1[ ]*([^ ].*)[ ]+localhost[ ]+([^ ].*)'
-        line:   '127.0.0.1    localhost \1 \2'
-      - regexp: '^127\.0\.1\.1'
-        line:   "127.0.1.1    {{ ansible_nodename }} {{ ansible_hostname }}"
-        insertafter: '^127\.0\.0\.1'
-        backrefs: no
     register: hosts_change_result
 
   - name: Redefine rocket_chat_dep_packages to add dist specific packages if needed
