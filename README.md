@@ -1,5 +1,7 @@
 # Rocket.Chat server -- Ubuntu 18.04 ansible role
 
+> This module is intended for educational purposes, do not use in production
+
 This ansible role is directly based on the official (non-working)
 [RocketChat ansible role](https://github.com/RocketChat/Rocket.Chat.Ansible).
 
