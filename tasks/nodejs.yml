@@ -1,0 +1,38 @@
+---
+- name: Check for npm
+  stat:
+    path: "{{ rocket_chat_npm_dist }}"
+  register: dist_npm_bin
+
+- name: Ensure node-version-manager (n) is installed (NPM)
+  npm:
+    name: n
+    global: true
+    executable: "{{ rocket_chat_npm_dist }}"
+  when: ('stat' in dist_npm_bin)
+         and (dist_npm_bin.stat.exists | bool)
+
+- name: Check to see if n has installed the required binaries in {{ rocket_chat_node_prefix }}
+  stat:
+    path: "{{ rocket_chat_node_path }}"
+  register: n_node_bin
+
+- name: "Install the supported NodeJS environment via n [Version: {{ rocket_chat_node_version }}]"
+  shell: n {{ rocket_chat_node_version }}
+  when: ('stat' in n_node_bin)
+         and (not (n_node_bin.stat.exists | bool))
+
+- name: Check to see if the proper npm version has already been installed
+  command: "{{ rocket_chat_npm_path }} --version"
+  changed_when: false
+  register: current_npm_version
+
+- name: "Install the supported NPM version via npm [Version: {{ rocket_chat_npm_version }}]"
+  npm:
+    name: npm
+    version: "{{ rocket_chat_npm_version }}"
+    path: "{{ rocket_chat_node_prefix }}/lib"
+    executable: "{{ rocket_chat_npm_path }}"
+  environment:
+    PATH: "{{ rocket_chat_node_prefix }}/bin:{{ ansible_env.PATH }}"
+  when: (current_npm_version != rocket_chat_npm_version)

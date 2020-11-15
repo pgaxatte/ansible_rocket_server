@@ -1,0 +1,36 @@
+---
+rocket_chat_dep_packages:
+  - git
+  - graphicsmagick
+  - nodejs
+  - npm
+  - make
+  - wget
+  - cron
+  - gnupg2
+
+rocket_chat_nginx_process_user: www-data
+
+rocket_chat_service_update_command: systemctl daemon-reload
+rocket_chat_service_template:
+  src: rocketchat.service.j2
+  dest: /etc/systemd/system/rocketchat.service
+rocket_chat_service_template_at:
+  src: rocketchat@.service.j2
+  dest: /etc/systemd/system/rocketchat@.service
+
+rocket_chat_mongodb_URI: "\
+  {% set temp_out =
+      rocket_chat_mongodb_server ~ ':' ~ rocket_chat_mongodb_port -%}
+  {% if rocket_chat_mongodb_user and rocket_chat_mongodb_password -%}
+      {% set temp_out =
+          rocket_chat_mongodb_user
+              ~ ':' ~ rocket_chat_mongodb_password
+              ~ '@' ~ temp_out -%}
+  {% endif -%}
+  {% set temp_out =
+      temp_out ~ '/' ~ rocket_chat_mongodb_database -%}
+  {% if (rocket_chat_mongodb_use_tls | bool) == true -%}
+      {% set temp_out = temp_out ~ '?ssl=true' -%}
+  {% endif -%}
+  {{ temp_out }}"

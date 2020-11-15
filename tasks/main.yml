@@ -1,0 +1,254 @@
+---
+# tasks/main.yml: Main tasks for RocketChat.Ansible
+
+  - name: Ensure the Rocket.Chat service group is present
+    group:
+      name: "{{ rocket_chat_service_group }}"
+      state: present
+      system: true
+
+  - name: Ensure the Rocket.Chat service user is present
+    user:
+      comment: Rocket.Chat Service User
+      name: "{{ rocket_chat_service_user }}"
+      group: "{{ rocket_chat_service_group }}"
+      home: "{{ rocket_chat_application_path }}"
+      createhome: true
+      shell: /bin/false
+      state: present
+      system: true
+
+  - name: Ensure APT cache has been updated recently
+    apt:
+      update_cache: yes
+      cache_valid_time: 3600
+    when: ((ansible_pkg_mgr | lower) == "apt")
+
+  # https://docs.ansible.com/ansible/latest/become.html#becoming-an-unprivileged-user
+  - name: Install acl controls
+    package:
+      name: acl
+      state: present
+
+  - name: Check for adequate privilege escalation rights
+    ping:
+    become: yes
+    become_user: "{{ rocket_chat_service_user }}"
+    ignore_errors: true
+    register: priv_check_result
+  - assert:
+      that: (priv_check_result is succeeded)
+      msg: >
+        Check your sudo configuration to ensure that your connecting user
+        can assume the identities of other users without prompting.
+
+  - name: "Configure /etc/hosts"
+    lineinfile:
+      dest: /etc/hosts
+      line: "{{ item.line }}"
+      regexp: "{{ item.regexp }}"
+      insertafter: "{{ item.insertafter | default(omit) }}"
+      insertbefore: "{{ item.insertbefore | default(omit) }}"
+      backrefs: "{{ item.backrefs | default(True) }}"
+    when: ansible_virtualization_type != "docker"
+    with_items:
+      - regexp: '^127\.0\.0\.1(.*){{ ansible_nodename }}(.*)'
+        line:   '127.0.0.1 \1 \2'
+      - regexp: '^127\.0\.0\.1(.*){{ ansible_hostname }}(.*)'
+        line:   '127.0.0.1 \1 \2'
+      - regexp: '^127\.0\.0\.1[ ]*([^ ].*)[ ]+localhost[ ]+([^ ].*)'
+        line:   '127.0.0.1    localhost \1 \2'
+      - regexp: '^127\.0\.1\.1'
+        line:   "127.0.1.1    {{ ansible_nodename }} {{ ansible_hostname }}"
+        insertafter: '^127\.0\.0\.1'
+        backrefs: no
+    register: hosts_change_result
+
+  - name: Redefine rocket_chat_dep_packages to add dist specific packages if needed
+    set_fact:
+      rocket_chat_dep_packages:
+        "{{ rocket_chat_dep_packages | union(rocket_chat_dist_specific_packages) | unique }}"
+    when:
+      - (rocket_chat_dist_specific_packages is defined)
+      - (rocket_chat_dist_specific_packages)
+
+  - name: Ensure Rocket.Chat dependencies are installed
+    package:
+      name:
+        "{{
+            (ansible_virtualization_type != 'docker') |
+            ternary(
+              rocket_chat_dep_packages,
+              rocket_chat_dep_packages | difference('[\"cron\"]')
+              )
+          }}"
+      state: present
+    register: dep_install_result
+    until: (dep_install_result is succeeded)
+    retries: 2
+    tags: packages
+
+  - import_tasks: nodejs.yml
+    tags: nodejs
+
+  - name: Check to see if this is the initial Rocket.Chat deployment
+    stat:
+      path: "{{ rocket_chat_application_path }}/bundle"
+    register: rocket_chat_deploy_state
+
+  - name: Set the initial Rocket.Chat upgrade status
+    set_fact:
+      rocket_chat_upgraded: false
+
+  - name: Setup PGP for verifying the Rocket.Chat tarball
+    block:
+
+    - name: "Import RochetChat PGP Key from keyserver: {{ rocket_chat_tarball_gpg_keyserver }}"
+      shell: |
+        {{ rocket_chat_pgp_command }} \
+            --keyserver "{{ rocket_chat_tarball_gpg_keyserver }}" \
+            --recv-keys "{{ rocket_chat_tarball_gpg_key }}"
+      changed_when: "'not changed' not in key_recv_result.stderr"
+      register: key_recv_result
+      until:  (key_recv_result is succeeded)
+      retries: 4
+
+    - name: Fetch the Rocket.Chat binary tarball PGP signature
+      get_url:
+        url: "{{ rocket_chat_tarball_asc_remote }}"
+        force: yes
+        dest: "{{ rocket_chat_application_path }}/rocket.chat-{{ rocket_chat_version }}.asc"
+        timeout: "{{ rocket_chat_tarball_fetch_timeout }}"
+        validate_certs: "{{ rocket_chat_tarball_validate_remote_cert }}"
+        owner: "{{ rocket_chat_service_user }}"
+        group: "{{ rocket_chat_service_group }}"
+      register: get_pgp_asc_result
+      until: (get_pgp_asc_result is succeeded)
+      retries: 2
+    when: (rocket_chat_tarball_check_pgp | bool)
+    tags: pgp
+
+  - name: Fetch the Rocket.Chat binary tarball
+    get_url:
+      url: "{{ rocket_chat_tarball_remote }}"
+      checksum: "{{ (rocket_chat_tarball_check_checksum == false) | ternary(omit, 'sha256: ' + (rocket_chat_tarball_sha256sum|string)) }}"
+      force: yes
+      dest: "{{ rocket_chat_application_path }}/rocket.chat-{{ rocket_chat_version }}.tgz"
+      timeout: "{{ rocket_chat_tarball_fetch_timeout }}"
+      validate_certs: "{{ rocket_chat_tarball_validate_remote_cert }}"
+      owner: "{{ rocket_chat_service_user }}"
+      group: "{{ rocket_chat_service_group }}"
+    # Temp fix for ansible/ansible#15915 ( Broken include in handlers )
+    # https://github.com/ansible/ansible/issues/15915
+    #notify: Upgrade Rocket.Chat
+    register: download_result
+    until: (download_result is succeeded)
+    retries: 2
+    changed_when: (download_result is changed)
+                   or (not (rocket_chat_tarball_check_checksum | bool))
+    tags:
+      - download
+      - pgp
+
+  - name: Verify Rocket.Chat binary tarball with GPG
+    shell: |
+      {{ rocket_chat_pgp_command }} \
+        --verify rocket.chat-{{ rocket_chat_version }}.asc \
+                 rocket.chat-{{ rocket_chat_version }}.tgz
+    args:
+      chdir: "{{ rocket_chat_application_path }}"
+    when: (rocket_chat_tarball_check_pgp | bool)
+    changed_when: false
+    tags: pgp
+
+  - name: Upgrade Rocket.Chat
+    include_tasks: upgrade.yml
+    when:
+      - ( download_result is changed)
+      - ('stat' in rocket_chat_deploy_state)
+      - (rocket_chat_deploy_state.stat.exists | bool)
+    tags:
+      - upgrade
+
+  - meta: flush_handlers
+
+  - name: Unpack the Rocket.Chat binary tarball
+    unarchive:
+      copy: false
+      src: "{{ rocket_chat_application_path }}/rocket.chat-{{ rocket_chat_version }}.tgz"
+      dest: "{{ rocket_chat_application_path }}"
+      creates: "{{ rocket_chat_application_path }}/bundle"
+      owner: "{{ rocket_chat_service_user }}"
+      group: "{{ rocket_chat_service_group }}"
+    tags: build
+
+  - name: Install Rocket.Chat via NPM
+    npm:
+      state: present
+      path: "{{ rocket_chat_application_path }}/bundle/programs/server"
+      executable: "{{ rocket_chat_npm_path }}"
+      production: true
+    become: true
+    become_user: "{{ rocket_chat_service_user }}"
+    environment:
+      PATH: "{{ rocket_chat_node_prefix }}/bin:{{ ansible_env.PATH }}"
+    tags: build
+
+  - name: Ensure the Rocket.Chat application data permissions are correct
+    command: >-
+      chown {{ rocket_chat_service_user }}.{{ rocket_chat_service_group }}
+      -R {{ rocket_chat_application_path | quote }}
+    args:
+      warn: no
+    tags: build
+
+  - name: Deploy the Rocket.Chat service file
+    template:
+      src: "{{ rocket_chat_service_template.src }}"
+      dest: "{{ rocket_chat_service_template.dest }}"
+    notify:
+      - Update the Rocket.Chat service configuration
+      - Restart the Rocket.Chat service
+    tags: service
+
+  - name: Deploy the Rocket.Chat@ service file
+    template:
+      src: "{{ rocket_chat_service_template_at.src }}"
+      dest: "{{ rocket_chat_service_template_at.dest }}"
+    notify:
+      - Update the Rocket.Chat service configuration
+      - Restart the Rocket.Chat@ services
+    tags: service
+    when: rocket_chat_service_extra_instances
+
+  - meta: flush_handlers
+
+  - name: Stop the Rocket.Chat@ services [UPGRADE]
+    service:
+      name: "rocketchat@{{ item }}"
+      state: restarted
+    when: (rocket_chat_upgraded | bool)
+    with_list: "{{ rocket_chat_service_extra_instances }}"
+    tags: service
+
+  - name: Restart the Rocket.Chat service [UPGRADE]
+    service:
+      name: rocketchat
+      state: restarted
+    when: (rocket_chat_upgraded | bool)
+    tags: service
+
+  - name: Ensure the Rocket.Chat service is running/enabled
+    service:
+      name: rocketchat
+      state: started
+      enabled: true
+    tags: service
+
+  - name: Ensure the Rocket.Chat@ services are running/enabled
+    service:
+      name: "rocketchat@{{ item }}"
+      state: started
+      enabled: true
+    with_list: "{{ rocket_chat_service_extra_instances }}"
+    tags: service
